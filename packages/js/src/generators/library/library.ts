@@ -207,10 +207,23 @@ export async function libraryGeneratorInternal(
         json.references ??= [];
         json.references.push({ path: './tsconfig.lib.json' });
 
-        if (options.isUsingTsSolutionConfig && options.bundler === 'rollup') {
-          json.compilerOptions.module = 'esnext';
-          json.compilerOptions.moduleResolution = 'bundler';
+        const compilerOptions = getCompilerOptions(options);
+        // respect the module and moduleResolution set by the test runner generator
+        if (json.compilerOptions.module) {
+          compilerOptions.module = json.compilerOptions.module;
         }
+        if (json.compilerOptions.moduleResolution) {
+          compilerOptions.moduleResolution =
+            json.compilerOptions.moduleResolution;
+        }
+
+        // filter out options already set with the same value in root tsconfig file that we're going to extend from
+        json.compilerOptions = getNeededCompilerOptionOverrides(
+          tree,
+          { ...json.compilerOptions, ...compilerOptions },
+          // must have been created by now
+          getRootTsConfigFileName(tree)!
+        );
 
         return json;
       }
@@ -458,25 +471,25 @@ export async function addLint(
           ruleSeverity = value;
           ruleOptions = {};
         }
-        if (options.bundler === 'vite' || options.unitTestRunner === 'vitest') {
-          ruleOptions.ignoredFiles ??= [];
-          ruleOptions.ignoredFiles.push(
-            '{projectRoot}/vite.config.{js,ts,mjs,mts}'
-          );
-          o.rules['@nx/dependency-checks'] = [ruleSeverity, ruleOptions];
+        const ignoredFiles = new Set(ruleOptions.ignoredFiles ?? []);
+        if (options.bundler === 'vite') {
+          ignoredFiles.add('{projectRoot}/vite.config.{js,ts,mjs,mts}');
         } else if (options.bundler === 'rollup') {
-          ruleOptions.ignoredFiles ??= [];
-          ruleOptions.ignoredFiles.push(
+          ignoredFiles.add(
             '{projectRoot}/rollup.config.{js,ts,mjs,mts,cjs,cts}'
           );
-          o.rules['@nx/dependency-checks'] = [ruleSeverity, ruleOptions];
         } else if (options.bundler === 'esbuild') {
-          ruleOptions.ignoredFiles ??= [];
-          ruleOptions.ignoredFiles.push(
-            '{projectRoot}/esbuild.config.{js,ts,mjs,mts}'
-          );
+          ignoredFiles.add('{projectRoot}/esbuild.config.{js,ts,mjs,mts}');
+        }
+        if (options.unitTestRunner === 'vitest') {
+          ignoredFiles.add('{projectRoot}/vite.config.{js,ts,mjs,mts}');
+        }
+
+        if (ignoredFiles.size) {
+          ruleOptions.ignoredFiles = Array.from(ignoredFiles);
           o.rules['@nx/dependency-checks'] = [ruleSeverity, ruleOptions];
         }
+
         return o;
       }
     );
@@ -672,6 +685,13 @@ function createFiles(tree: Tree, options: NormalizedLibraryGeneratorOptions) {
       };
       return json;
     });
+  } else if (
+    !options.isUsingTsSolutionConfig &&
+    options.useProjectJson &&
+    (!options.bundler || options.bundler === 'none') &&
+    !(options.projectRoot === '.')
+  ) {
+    tree.delete(packageJsonPath);
   }
 
   if (options.minimal && !(options.projectRoot === '.')) {
@@ -968,34 +988,8 @@ function createProjectTsConfigs(
 ) {
   const rootOffset = offsetFromRoot(options.projectRoot);
 
-  let compilerOptionOverrides: Record<keyof CompilerOptions, any> = {
-    module: options.isUsingTsSolutionConfig
-      ? options.bundler === 'rollup'
-        ? 'esnext'
-        : 'nodenext'
-      : 'commonjs',
-    ...(options.isUsingTsSolutionConfig
-      ? options.bundler === 'rollup'
-        ? { moduleResolution: 'bundler' }
-        : { moduleResolution: 'nodenext' }
-      : {}),
-    ...(options.js ? { allowJs: true } : {}),
-    ...(options.strict
-      ? {
-          forceConsistentCasingInFileNames: true,
-          strict: true,
-          importHelpers: true,
-          noImplicitOverride: true,
-          noImplicitReturns: true,
-          noFallthroughCasesInSwitch: true,
-          ...(!options.isUsingTsSolutionConfig
-            ? { noPropertyAccessFromIndexSignature: true }
-            : {}),
-        }
-      : {}),
-  };
-
-  if (!options.rootProject || options.isUsingTsSolutionConfig) {
+  let compilerOptionOverrides = getCompilerOptions(options);
+  if (options.isUsingTsSolutionConfig) {
     // filter out options already set with the same value in root tsconfig file that we're going to extend from
     compilerOptionOverrides = getNeededCompilerOptionOverrides(
       tree,
@@ -1091,6 +1085,38 @@ function createProjectTsConfigs(
     joinPathFragments(options.projectRoot, 'tsconfig.json'),
     tsconfig
   );
+}
+
+function getCompilerOptions(
+  options: NormalizedLibraryGeneratorOptions
+): Record<keyof CompilerOptions, any> {
+  return {
+    module: options.isUsingTsSolutionConfig
+      ? options.bundler === 'rollup'
+        ? 'esnext'
+        : 'nodenext'
+      : 'commonjs',
+    ...(options.isUsingTsSolutionConfig
+      ? {
+          moduleResolution:
+            options.bundler === 'rollup' ? 'bundler' : 'nodenext',
+        }
+      : {}),
+    ...(options.js ? { allowJs: true } : {}),
+    ...(options.strict
+      ? {
+          forceConsistentCasingInFileNames: true,
+          strict: true,
+          importHelpers: true,
+          noImplicitOverride: true,
+          noImplicitReturns: true,
+          noFallthroughCasesInSwitch: true,
+          ...(!options.isUsingTsSolutionConfig
+            ? { noPropertyAccessFromIndexSignature: true }
+            : {}),
+        }
+      : {}),
+  };
 }
 
 function determineDependencies(
