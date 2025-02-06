@@ -1,11 +1,11 @@
-import 'nx/src/internal-testing-utils/mock-project-graph';
-
 import { installedCypressVersion } from '@nx/cypress/src/utils/cypress-version';
 import {
   getPackageManagerCommand,
   getProjects,
+  ProjectGraph,
   readJson,
   readNxJson,
+  readProjectConfiguration,
   Tree,
   updateJson,
   updateNxJson,
@@ -20,6 +20,17 @@ const { load } = require('@zkochan/js-yaml');
 // need to mock cypress otherwise it'll use the nx installed version from package.json
 //  which is v9 while we are testing for the new v10 version
 jest.mock('@nx/cypress/src/utils/cypress-version');
+
+let projectGraph: ProjectGraph;
+jest.mock('@nx/devkit', () => {
+  const original = jest.requireActual('@nx/devkit');
+  return {
+    ...original,
+    createProjectGraphAsync: jest
+      .fn()
+      .mockImplementation(() => Promise.resolve(projectGraph)),
+  };
+});
 
 const packageCmd = getPackageManagerCommand().exec;
 
@@ -41,6 +52,7 @@ describe('app', () => {
   beforeEach(() => {
     mockedInstalledCypressVersion.mockReturnValue(10);
     appTree = createTreeWithEmptyWorkspace();
+    projectGraph = { dependencies: {}, nodes: {}, externalNodes: {} };
   });
 
   describe('not nested', () => {
@@ -134,7 +146,6 @@ describe('app', () => {
       const snapshot = `
         "import { defineConfig, devices } from '@playwright/test';
         import { nxE2EPreset } from '@nx/playwright/preset';
-
         import { workspaceRoot } from '@nx/devkit';
 
         // For CI, you may want to set BASE_URL to the deployed application.
@@ -1321,7 +1332,6 @@ describe('app', () => {
           "name",
           "version",
           "private",
-          "nx",
         ]
       `);
       expect(readJson(appTree, 'myapp/tsconfig.json')).toMatchInlineSnapshot(`
@@ -1545,6 +1555,92 @@ describe('app', () => {
         'packages/shared/*',
       ]);
     });
+
+    it('should configure webpack correctly with the output contained within the project root', async () => {
+      await applicationGenerator(appTree, {
+        directory: 'apps/my-app',
+        bundler: 'webpack',
+        linter: Linter.EsLint,
+        style: 'none',
+        e2eTestRunner: 'none',
+        addPlugin: true,
+        skipFormat: true,
+      });
+
+      expect(appTree.read('apps/my-app/webpack.config.js', 'utf-8'))
+        .toMatchInlineSnapshot(`
+        "const { NxAppWebpackPlugin } = require('@nx/webpack/app-plugin');
+        const { NxReactWebpackPlugin } = require('@nx/react/webpack-plugin');
+        const { join } = require('path');
+
+        module.exports = {
+          output: {
+            path: join(__dirname, 'dist'),
+          },
+          devServer: {
+            port: 4200,
+            historyApiFallback: {
+              index: '/index.html',
+              disableDotRule: true,
+              htmlAcceptHeaders: ['text/html', 'application/xhtml+xml'],
+            },
+          },
+          plugins: [
+            new NxAppWebpackPlugin({
+              tsConfig: './tsconfig.app.json',
+              compiler: 'babel',
+              main: './src/main.tsx',
+              index: './src/index.html',
+              baseHref: '/',
+              assets: ["./src/favicon.ico","./src/assets"],
+              styles: [],
+              outputHashing: process.env['NODE_ENV'] === 'production' ? 'all' : 'none',
+              optimization: process.env['NODE_ENV'] === 'production',
+            }),
+            new NxReactWebpackPlugin({
+              // Uncomment this line if you don't want to use SVGR
+              // See: https://react-svgr.com/
+              // svgr: false
+            }),
+          ],
+        };
+        "
+      `);
+    });
+
+    it('should configure webpack build task correctly with the output contained within the project root', async () => {
+      await applicationGenerator(appTree, {
+        directory: 'apps/my-app',
+        bundler: 'webpack',
+        linter: Linter.EsLint,
+        style: 'none',
+        e2eTestRunner: 'none',
+        addPlugin: false,
+        skipFormat: true,
+      });
+
+      expect(
+        readProjectConfiguration(appTree, '@proj/my-app').targets.build.options
+          .outputPath
+      ).toBe('apps/my-app/dist');
+    });
+
+    it('should configure rspack build task correctly with the output contained within the project root', async () => {
+      await applicationGenerator(appTree, {
+        directory: 'apps/my-app',
+        bundler: 'rspack',
+        linter: Linter.EsLint,
+        style: 'none',
+        e2eTestRunner: 'none',
+        addPlugin: true,
+        skipFormat: true,
+      });
+
+      expect(
+        readProjectConfiguration(appTree, '@proj/my-app').targets.build.options
+          .outputPath
+      ).toBe('apps/my-app/dist');
+    });
   });
 
   describe('--bundler=rsbuild', () => {
@@ -1569,5 +1665,56 @@ describe('app', () => {
         expect(configContents).toMatchSnapshot();
       }
     );
+  });
+
+  describe('react 19 support', () => {
+    beforeEach(() => {
+      projectGraph = { dependencies: {}, nodes: {}, externalNodes: {} };
+    });
+
+    it('should add react 19 dependencies when react version is not found', async () => {
+      projectGraph.externalNodes['npm:react'] = undefined;
+      const tree = createTreeWithEmptyWorkspace();
+
+      await applicationGenerator(tree, {
+        ...schema,
+        directory: 'my-dir/my-app',
+      });
+
+      const packageJson = readJson(tree, 'package.json');
+      expect(packageJson.dependencies['react']).toMatchInlineSnapshot(
+        `"19.0.0"`
+      );
+      expect(packageJson.dependencies['react-dom']).toMatchInlineSnapshot(
+        `"19.0.0"`
+      );
+    });
+
+    it('should add react 18 dependencies when react version is already 18', async () => {
+      const tree = createTreeWithEmptyWorkspace();
+
+      projectGraph.externalNodes['npm:react'] = {
+        type: 'npm',
+        name: 'npm:react',
+        data: {
+          version: '18.3.1',
+          packageName: 'react',
+          hash: 'sha512-4+0/v9+l9/3+3/2+2/1+1/0',
+        },
+      };
+
+      await applicationGenerator(tree, {
+        ...schema,
+        directory: 'my-dir/my-app',
+      });
+
+      const packageJson = readJson(tree, 'package.json');
+      expect(packageJson.dependencies['react']).toMatchInlineSnapshot(
+        `"18.3.1"`
+      );
+      expect(packageJson.dependencies['react-dom']).toMatchInlineSnapshot(
+        `"18.3.1"`
+      );
+    });
   });
 });

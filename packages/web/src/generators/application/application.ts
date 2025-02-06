@@ -83,6 +83,7 @@ function createApplicationFiles(tree: Tree, options: NormalizedSchema) {
       }
     );
   } else {
+    const rootOffset = offsetFromRoot(options.appProjectRoot);
     generateFiles(
       tree,
       join(__dirname, './files/app-webpack'),
@@ -91,18 +92,21 @@ function createApplicationFiles(tree: Tree, options: NormalizedSchema) {
         ...options,
         ...names(options.name),
         tmpl: '',
-        offsetFromRoot: offsetFromRoot(options.appProjectRoot),
+        offsetFromRoot: rootOffset,
         rootTsConfigPath,
         webpackPluginOptions: hasWebpackPlugin(tree)
           ? {
               compiler: options.compiler,
               target: 'web',
-              outputPath: joinPathFragments(
-                'dist',
-                options.appProjectRoot != '.'
-                  ? options.appProjectRoot
-                  : options.projectName
-              ),
+              outputPath: options.isUsingTsSolutionConfig
+                ? 'dist'
+                : joinPathFragments(
+                    rootOffset,
+                    'dist',
+                    options.appProjectRoot !== '.'
+                      ? options.appProjectRoot
+                      : options.projectName
+                  ),
               tsConfig: './tsconfig.app.json',
               main: './src/main.ts',
               assets: ['./src/favicon.ico', './src/assets'],
@@ -181,7 +185,7 @@ async function setupBundler(tree: Tree, options: NormalizedSchema) {
       addPlugin: options.addPlugin,
     });
     const project = readProjectConfiguration(tree, options.projectName);
-    if (project.targets.build) {
+    if (project.targets?.build) {
       const prodConfig = project.targets.build.configurations.production;
       const buildOptions = project.targets.build.options;
       buildOptions.assets = assets;
@@ -247,12 +251,11 @@ async function addProject(tree: Tree, options: NormalizedSchema) {
       name: getImportPath(tree, options.name),
       version: '0.0.1',
       private: true,
-      nx: {
-        name: options.name,
-        projectType: 'application',
-        sourceRoot: `${options.appProjectRoot}/src`,
-        tags: options.parsedTags?.length ? options.parsedTags : undefined,
-      },
+      nx: options.parsedTags?.length
+        ? {
+            tags: options.parsedTags,
+          }
+        : undefined,
     });
   } else {
     addProjectConfiguration(tree, options.projectName, {
@@ -288,11 +291,16 @@ export async function applicationGenerator(host: Tree, schema: Schema) {
 export async function applicationGeneratorInternal(host: Tree, schema: Schema) {
   const options = await normalizeOptions(host, schema);
 
+  if (options.isUsingTsSolutionConfig) {
+    addProjectToTsSolutionWorkspace(host, options.appProjectRoot);
+  }
+
   const tasks: GeneratorCallback[] = [];
 
   const jsInitTask = await jsInitGenerator(host, {
     js: false,
     skipFormat: true,
+    platform: 'web',
   });
   tasks.push(jsInitTask);
   const webTask = await webInitGenerator(host, {
@@ -665,10 +673,6 @@ export async function applicationGeneratorInternal(host: Tree, schema: Schema) {
       : undefined
   );
 
-  if (options.isUsingTsSolutionConfig) {
-    addProjectToTsSolutionWorkspace(host, options.appProjectRoot);
-  }
-
   if (!options.skipFormat) {
     await formatFiles(host);
   }
@@ -718,7 +722,9 @@ async function normalizeOptions(
     name: names(options.name).fileName,
     compiler: options.compiler ?? 'babel',
     bundler: options.bundler ?? 'webpack',
-    projectName: appProjectName,
+    projectName: isUsingTsSolutionConfig
+      ? getImportPath(host, appProjectName)
+      : appProjectName,
     strict: options.strict ?? true,
     appProjectRoot,
     e2eProjectRoot,

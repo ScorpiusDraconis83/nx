@@ -12,12 +12,10 @@ import {
   Tree,
   updateJson,
   updateProjectConfiguration,
-  visitNotIgnoredFiles,
 } from '@nx/devkit';
 import { logShowProjectCommand } from '@nx/devkit/src/utils/log-show-project-command';
 import { initGenerator as jsInitGenerator } from '@nx/js';
 import { extractTsConfigBase } from '@nx/js/src/utils/typescript/create-ts-config';
-import { dirname } from 'node:path';
 import {
   createNxCloudOnboardingURLForWelcomeApp,
   getNxCloudAppOnBoardingUrl,
@@ -39,14 +37,13 @@ import initGenerator from '../init/init';
 import { updateDependencies } from '../utils/update-dependencies';
 import {
   addE2E,
+  addViteTempFilesToGitIgnore,
   normalizeOptions,
   updateUnitTestConfig,
-  addViteTempFilesToGitIgnore,
 } from './lib';
 import { NxRemixGeneratorSchema } from './schema';
 import {
   addProjectToTsSolutionWorkspace,
-  isUsingTsSolutionSetup,
   updateTsconfigFiles,
 } from '@nx/js/src/utils/typescript/ts-solution-setup';
 import { sortPackageJsonFields } from '@nx/js/src/utils/package-json/sort-fields';
@@ -74,6 +71,7 @@ export async function remixApplicationGeneratorInternal(
       skipFormat: true,
       addTsPlugin: _options.useTsSolution,
       formatter: _options.formatter,
+      platform: 'web',
     }),
   ];
 
@@ -84,9 +82,13 @@ export async function remixApplicationGeneratorInternal(
     );
   }
 
-  const isUsingTsSolution = isUsingTsSolutionSetup(tree);
+  // If we are using the new TS solution
+  // We need to update the workspace file (package.json or pnpm-workspaces.yaml) to include the new project
+  if (options.isUsingTsSolutionConfig) {
+    addProjectToTsSolutionWorkspace(tree, options.projectRoot);
+  }
 
-  if (!isUsingTsSolution) {
+  if (!options.isUsingTsSolutionConfig) {
     addProjectConfiguration(tree, options.projectName, {
       root: options.projectRoot,
       sourceRoot: `${options.projectRoot}`,
@@ -121,7 +123,6 @@ export async function remixApplicationGeneratorInternal(
     eslintVersion,
     typescriptVersion,
     viteVersion,
-    isUsingTsSolution,
   };
 
   generateFiles(
@@ -153,7 +154,7 @@ export async function remixApplicationGeneratorInternal(
     );
   }
 
-  if (isUsingTsSolution) {
+  if (options.isUsingTsSolutionConfig) {
     generateFiles(
       tree,
       joinPathFragments(__dirname, 'files/ts-solution'),
@@ -206,6 +207,7 @@ export async function remixApplicationGeneratorInternal(
         skipPackageJson: false,
         skipFormat: true,
         addPlugin: true,
+        compiler: options.useTsSolution ? 'swc' : undefined,
       });
       const projectConfig = readProjectConfiguration(tree, options.projectName);
       if (projectConfig.targets?.['test']?.options) {
@@ -326,12 +328,6 @@ export default {...nxPreset};
       : undefined,
     '.'
   );
-
-  // If we are using the new TS solution
-  // We need to update the workspace file (package.json or pnpm-workspaces.yaml) to include the new project
-  if (options.useTsSolution) {
-    addProjectToTsSolutionWorkspace(tree, options.projectRoot);
-  }
 
   sortPackageJsonFields(tree, options.projectRoot);
 

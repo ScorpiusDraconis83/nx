@@ -34,6 +34,39 @@ describe('lib', () => {
     tree.write('/.gitignore', '');
   });
 
+  it.each`
+    bundler
+    ${'esbuild'}
+    ${'none'}
+    ${'rollup'}
+    ${'swc'}
+    ${'tsc'}
+    ${'vite'}
+  `(
+    'should generate tsconfig.lib.json with integrated setup when bundler=$bundler',
+    async ({ bundler }) => {
+      await libraryGenerator(tree, {
+        ...defaultOptions,
+        directory: 'my-lib',
+        bundler,
+        unitTestRunner: 'none',
+        linter: 'none',
+      });
+
+      const { compilerOptions } = readJson(tree, 'my-lib/tsconfig.lib.json');
+      expect(compilerOptions).toEqual(
+        expect.objectContaining({
+          outDir: '../dist/out-tsc',
+          declaration: true,
+        })
+      );
+      // check a few options set in the TS solution setup are not set
+      expect(compilerOptions.rootDir).not.toBeDefined();
+      expect(compilerOptions.tsBuildInfoFile).not.toBeDefined();
+      expect(compilerOptions.emitDeclarationOnly).not.toBeDefined();
+    }
+  );
+
   describe('configs', () => {
     it('should generate an empty ts lib using --config=npm-scripts', async () => {
       await libraryGenerator(tree, {
@@ -440,6 +473,95 @@ describe('lib', () => {
       expect(packageJson.devDependencies['@nx/eslint-plugin']).toBeDefined();
     });
 
+    it.each`
+      bundler      | expectedIgnoredFile
+      ${'rollup'}  | ${'{projectRoot}/rollup.config.{js,ts,mjs,mts,cjs,cts}'}
+      ${'esbuild'} | ${'{projectRoot}/esbuild.config.{js,ts,mjs,mts}'}
+      ${'vite'}    | ${'{projectRoot}/vite.config.{js,ts,mjs,mts}'}
+    `(
+      'should ignore $expectedIgnoredFile when bundler=$bundler',
+      async ({ bundler, expectedIgnoredFile }) => {
+        await libraryGenerator(tree, {
+          ...defaultOptions,
+          directory: 'my-lib',
+          linter: 'eslint',
+          bundler,
+        });
+
+        expect(
+          readJson(tree, 'my-lib/.eslintrc.json').overrides
+        ).toContainEqual({
+          files: ['*.json'],
+          parser: 'jsonc-eslint-parser',
+          rules: {
+            '@nx/dependency-checks': [
+              'error',
+              {
+                ignoredFiles: [
+                  '{projectRoot}/eslint.config.{js,cjs,mjs}',
+                  expectedIgnoredFile,
+                ],
+              },
+            ],
+          },
+        });
+      }
+    );
+
+    it('should ignore rollup and vite config files when bundler=rollup and unitTestRunner=vitest', async () => {
+      await libraryGenerator(tree, {
+        ...defaultOptions,
+        directory: 'my-lib',
+        linter: 'eslint',
+        bundler: 'rollup',
+        unitTestRunner: 'vitest',
+      });
+
+      expect(readJson(tree, 'my-lib/.eslintrc.json').overrides).toContainEqual({
+        files: ['*.json'],
+        parser: 'jsonc-eslint-parser',
+        rules: {
+          '@nx/dependency-checks': [
+            'error',
+            {
+              ignoredFiles: [
+                '{projectRoot}/eslint.config.{js,cjs,mjs}',
+                '{projectRoot}/rollup.config.{js,ts,mjs,mts,cjs,cts}',
+                '{projectRoot}/vite.config.{js,ts,mjs,mts}',
+              ],
+            },
+          ],
+        },
+      });
+    });
+
+    it('should ignore esbuild and vite config files when bundler=esbuild and unitTestRunner=vitest', async () => {
+      await libraryGenerator(tree, {
+        ...defaultOptions,
+        directory: 'my-lib',
+        linter: 'eslint',
+        bundler: 'esbuild',
+        unitTestRunner: 'vitest',
+      });
+
+      expect(readJson(tree, 'my-lib/.eslintrc.json').overrides).toContainEqual({
+        files: ['*.json'],
+        parser: 'jsonc-eslint-parser',
+        rules: {
+          '@nx/dependency-checks': [
+            'error',
+            {
+              ignoredFiles: [
+                '{projectRoot}/eslint.config.{js,cjs,mjs}',
+                '{projectRoot}/esbuild.config.{js,ts,mjs,mts}',
+                '{projectRoot}/vite.config.{js,ts,mjs,mts}',
+              ],
+            },
+          ],
+        },
+      });
+    });
+
     describe('not nested', () => {
       it('should create a local .eslintrc.json', async () => {
         await libraryGenerator(tree, {
@@ -693,34 +815,100 @@ describe('lib', () => {
   });
 
   describe('--unit-test-runner jest', () => {
-    it('should generate test configuration', async () => {
-      await libraryGenerator(tree, {
-        ...defaultOptions,
-        directory: 'my-lib',
-        unitTestRunner: 'jest',
-      });
+    it.each`
+      bundler
+      ${'esbuild'}
+      ${'none'}
+      ${'tsc'}
+      ${'vite'}
+    `(
+      'should generate test config with ts-jest when bundler=$bundler',
+      async ({ bundler }) => {
+        await libraryGenerator(tree, {
+          ...defaultOptions,
+          directory: 'my-lib',
+          unitTestRunner: 'jest',
+          bundler,
+        });
 
-      expect(tree.exists('my-lib/tsconfig.spec.json')).toBeTruthy();
-      expect(tree.exists('my-lib/jest.config.ts')).toBeTruthy();
-      expect(tree.exists('my-lib/src/lib/my-lib.spec.ts')).toBeTruthy();
+        expect(tree.exists('my-lib/tsconfig.spec.json')).toBeTruthy();
+        expect(tree.exists('my-lib/src/lib/my-lib.spec.ts')).toBeTruthy();
+        expect(tree.exists('my-lib/jest.config.ts')).toBeTruthy();
+        expect(tree.read('my-lib/jest.config.ts', 'utf-8'))
+          .toMatchInlineSnapshot(`
+                  "export default {
+                    displayName: 'my-lib',
+                    preset: '../jest.preset.js',
+                    transform: {
+                      '^.+\\\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json' }],
+                    },
+                    moduleFileExtensions: ['ts', 'js', 'html'],
+                    coverageDirectory: '../coverage/my-lib',
+                  };
+                  "
+              `);
+        const readme = tree.read('my-lib/README.md', 'utf-8');
+        expect(readme).toContain('nx test my-lib');
+      }
+    );
 
-      expect(tree.exists(`my-lib/jest.config.ts`)).toBeTruthy();
-      expect(tree.read(`my-lib/jest.config.ts`, 'utf-8'))
-        .toMatchInlineSnapshot(`
-        "export default {
+    it.each`
+      bundler
+      ${'swc'}
+      ${'rollup'}
+    `(
+      'should generate test config with @swc/jest when bundler=$bundler',
+      async ({ bundler }) => {
+        await libraryGenerator(tree, {
+          ...defaultOptions,
+          directory: 'my-lib',
+          unitTestRunner: 'jest',
+          bundler,
+        });
+
+        expect(tree.exists('my-lib/tsconfig.spec.json')).toBeTruthy();
+        expect(tree.exists('my-lib/src/lib/my-lib.spec.ts')).toBeTruthy();
+        expect(tree.exists('my-lib/jest.config.ts')).toBeTruthy();
+        expect(tree.read('my-lib/jest.config.ts', 'utf-8'))
+          .toMatchInlineSnapshot(`
+        "/* eslint-disable */
+        import { readFileSync } from 'fs';
+
+        // Reading the SWC compilation config and remove the "exclude"
+        // for the test files to be compiled by SWC
+        const { exclude: _, ...swcJestConfig } = JSON.parse(
+          readFileSync(\`\${__dirname}/.swcrc\`, 'utf-8')
+        );
+
+        // disable .swcrc look-up by SWC core because we're passing in swcJestConfig ourselves.
+        // If we do not disable this, SWC Core will read .swcrc and won't transform our test files due to "exclude"
+        if (swcJestConfig.swcrc === undefined) {
+          swcJestConfig.swcrc = false;
+        }
+
+        // Uncomment if using global setup/teardown files being transformed via swc
+        // https://nx.dev/nx-api/jest/documents/overview#global-setupteardown-with-nx-libraries
+        // jest needs EsModule Interop to find the default exported setup/teardown functions
+        // swcJestConfig.module.noInterop = false;
+
+        export default {
           displayName: 'my-lib',
           preset: '../jest.preset.js',
           transform: {
-            '^.+\\\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json' }],
+            '^.+\\\\.[tj]s$': ['@swc/jest', swcJestConfig],
           },
           moduleFileExtensions: ['ts', 'js', 'html'],
+          testEnvironment: 'jsdom',
           coverageDirectory: '../coverage/my-lib',
         };
         "
       `);
-      const readme = tree.read('my-lib/README.md', 'utf-8');
-      expect(readme).toContain('nx test my-lib');
-    });
+        const readme = tree.read('my-lib/README.md', 'utf-8');
+        expect(readme).toContain('nx test my-lib');
+        // assert the TS solution setup doesn't leak into the old/integrated setup
+        expect(tree.exists('my-lib/.spec.swcrc')).toBeFalsy();
+      }
+    );
 
     it('should generate test configuration with swc and js', async () => {
       await libraryGenerator(tree, {
@@ -1448,6 +1636,19 @@ describe('lib', () => {
     });
   });
 
+  describe('--bundler=none', () => {
+    it('should not generate a package.json when bundler is none', async () => {
+      await libraryGenerator(tree, {
+        ...defaultOptions,
+        directory: 'my-lib',
+        bundler: 'none',
+        unitTestRunner: 'none',
+      });
+
+      expect(tree.exists('my-lib/package.json')).toBe(false);
+    });
+  });
+
   describe('--minimal', () => {
     it('should generate a README.md when minimal is set to false', async () => {
       await libraryGenerator(tree, {
@@ -1602,14 +1803,7 @@ describe('lib', () => {
           },
         }
       `);
-      expect(readJson(tree, 'my-lib/package.json')).toMatchInlineSnapshot(`
-        {
-          "dependencies": {},
-          "name": "@proj/my-lib",
-          "private": true,
-          "version": "0.0.1",
-        }
-      `);
+      expect(tree.exists('my-lib/package.json')).toBe(false);
     });
   });
 
@@ -1916,5 +2110,81 @@ describe('lib', () => {
         }
       `);
     });
+
+    it.each`
+      bundler
+      ${'esbuild'}
+      ${'none'}
+      ${'rollup'}
+      ${'swc'}
+      ${'tsc'}
+      ${'vite'}
+    `(
+      'should generate js test config with @swc/jest when bundler=$bundler',
+      async ({ bundler }) => {
+        await libraryGenerator(tree, {
+          ...defaultOptions,
+          directory: 'my-lib',
+          unitTestRunner: 'jest',
+          bundler,
+        });
+
+        expect(tree.exists('my-lib/tsconfig.spec.json')).toBeTruthy();
+        expect(tree.exists('my-lib/src/lib/my-lib.spec.ts')).toBeTruthy();
+        expect(tree.exists('my-lib/jest.config.ts')).toBeTruthy();
+        expect(tree.read('my-lib/jest.config.ts', 'utf-8'))
+          .toMatchInlineSnapshot(`
+        "/* eslint-disable */
+        import { readFileSync } from 'fs';
+
+        // Reading the SWC compilation config for the spec files
+        const swcJestConfig = JSON.parse(
+          readFileSync(\`\${__dirname}/.spec.swcrc\`, 'utf-8')
+        );
+
+        // Disable .swcrc look-up by SWC core because we're passing in swcJestConfig ourselves
+        swcJestConfig.swcrc = false;
+
+        export default {
+          displayName: '@proj/my-lib',
+          preset: '../jest.preset.js',
+          transform: {
+            '^.+\\\\.[tj]s$': ['@swc/jest', swcJestConfig],
+          },
+          moduleFileExtensions: ['ts', 'js', 'html'],
+          coverageDirectory: 'test-output/jest/coverage',
+        };
+        "
+      `);
+        expect(tree.read('my-lib/.spec.swcrc', 'utf-8')).toMatchInlineSnapshot(`
+          "{
+            "jsc": {
+              "target": "es2017",
+              "parser": {
+                "syntax": "typescript",
+                "decorators": true,
+                "dynamicImport": true
+              },
+              "transform": {
+                "decoratorMetadata": true,
+                "legacyDecorator": true
+              },
+              "keepClassNames": true,
+              "externalHelpers": true,
+              "loose": true
+            },
+            "module": {
+              "type": "es6"
+            },
+            "sourceMaps": true,
+            "exclude": []
+          }
+          "
+        `);
+        expect(tree.read('my-lib/README.md', 'utf-8')).toContain(
+          'nx test my-lib'
+        );
+      }
+    );
   });
 });

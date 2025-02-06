@@ -49,8 +49,8 @@ describe('Node Applications', () => {
     updateFile(`apps/${nodeapp}/src/main.ts`, `console.log('Hello World!');`);
     runCLI(`build ${nodeapp}`);
 
-    checkFilesExist(`dist/apps/${nodeapp}/main.js`);
-    const result = execSync(`node dist/apps/${nodeapp}/main.js`, {
+    checkFilesExist(`apps/${nodeapp}/dist/main.js`);
+    const result = execSync(`node apps/${nodeapp}/dist/main.js`, {
       cwd: tmpProjPath(),
     }).toString();
     expect(result).toContain('Hello World!');
@@ -123,6 +123,45 @@ describe('Node Applications', () => {
 
     result = await getData(port, '/assets/file.txt');
     expect(result).toMatch(`Test`);
+
+    try {
+      await promisifiedTreeKill(p.pid, 'SIGKILL');
+      expect(await killPorts(port)).toBeTruthy();
+    } catch (err) {
+      expect(err).toBeFalsy();
+    }
+  }, 300_000);
+
+  it('should be able to generate a nest application', async () => {
+    const nestapp = uniq('nodeapp');
+    const port = getRandomPort();
+    process.env.PORT = `${port}`;
+    runCLI(
+      `generate @nx/nest:app apps/${nestapp} --linter=eslint --unitTestRunner=jest`
+    );
+
+    expect(() => runCLI(`lint ${nestapp}`)).not.toThrow();
+    expect(() => runCLI(`test ${nestapp}`)).not.toThrow();
+
+    runCLI(`build ${nestapp}`);
+    checkFilesExist(`apps/${nestapp}/dist/main.js`);
+
+    const p = await runCommandUntil(
+      `serve ${nestapp}`,
+      (output) =>
+        output.includes(
+          `Application is running on: http://localhost:${port}/api`
+        ),
+
+      {
+        env: {
+          NX_DAEMON: 'true',
+        },
+      }
+    );
+
+    const result = await getData(port, '/api');
+    expect(result.message).toMatch('Hello');
 
     try {
       await promisifiedTreeKill(p.pid, 'SIGKILL');

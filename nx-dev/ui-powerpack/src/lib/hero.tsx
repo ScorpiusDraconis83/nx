@@ -41,12 +41,12 @@ export function Hero(): ReactElement {
         </SectionHeading>
         <div className="mt-10 flex items-center justify-center gap-x-6">
           <ButtonLink
-            href="https://cloud.nx.app/powerpack/purchase?utm_source=nx.dev&utm_medium=referral&utm_campaign=nx-powerpackurl"
-            title="Talk to the engineering team"
+            href="https://cloud.nx.app/powerpack?utm_source=nx-website&utm_medium=referral&utm_campaign=powerpack-landing-page&utm_content=cta-button&utm_term=get-nx-powerpack-hero"
             variant="primary"
             size="default"
+            title="Get Powerpack License"
           >
-            Buy Powerpack
+            Get Powerpack License
           </ButtonLink>
           <a
             href={YOUTUBE_URL}
@@ -63,14 +63,14 @@ export function Hero(): ReactElement {
           </a>
         </div>
         <p className="mt-6 text-sm italic">
-          Want to use Powerpack for OSS?
+          Nx Powerpack is included in Nx Enterprise.
           <br />
           <Link
-            href="/powerpack/special-offer"
+            href="/enterprise/trial"
             prefetch={false}
             className="font-semibold underline"
           >
-            Apply for a free OSS license.
+            Request a free trial of Nx Enterprise
           </Link>
         </p>
       </div>

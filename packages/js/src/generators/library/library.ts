@@ -68,6 +68,7 @@ import type {
   NormalizedLibraryGeneratorOptions,
 } from './schema';
 import { sortPackageJsonFields } from '../../utils/package-json/sort-fields';
+import { getImportPath } from '../../utils/get-import-path';
 
 const defaultOutputDirectory = 'dist';
 
@@ -100,6 +101,12 @@ export async function libraryGeneratorInternal(
   );
   const options = await normalizeOptions(tree, schema);
 
+  // If we are using the new TS solution
+  // We need to update the workspace file (package.json or pnpm-workspaces.yaml) to include the new project
+  if (options.isUsingTsSolutionConfig) {
+    addProjectToTsSolutionWorkspace(tree, options.projectRoot);
+  }
+
   createFiles(tree, options);
 
   await configureProject(tree, options);
@@ -118,6 +125,7 @@ export async function libraryGeneratorInternal(
       project: options.name,
       compiler: 'swc',
       format: options.isUsingTsSolutionConfig ? ['esm'] : ['cjs', 'esm'],
+      skipFormat: true,
     });
   }
 
@@ -154,7 +162,11 @@ export async function libraryGeneratorInternal(
   if (options.unitTestRunner === 'jest') {
     const jestCallback = await addJest(tree, options);
     tasks.push(jestCallback);
-    if (options.bundler === 'swc' || options.bundler === 'rollup') {
+
+    if (
+      !options.isUsingTsSolutionConfig &&
+      (options.bundler === 'swc' || options.bundler === 'rollup')
+    ) {
       replaceJestConfig(tree, options);
     }
   } else if (
@@ -207,20 +219,27 @@ export async function libraryGeneratorInternal(
         json.references ??= [];
         json.references.push({ path: './tsconfig.lib.json' });
 
-        if (options.isUsingTsSolutionConfig && options.bundler === 'rollup') {
-          json.compilerOptions.module = 'esnext';
-          json.compilerOptions.moduleResolution = 'bundler';
+        const compilerOptions = getCompilerOptions(options);
+        // respect the module and moduleResolution set by the test runner generator
+        if (json.compilerOptions.module) {
+          compilerOptions.module = json.compilerOptions.module;
         }
+        if (json.compilerOptions.moduleResolution) {
+          compilerOptions.moduleResolution =
+            json.compilerOptions.moduleResolution;
+        }
+
+        // filter out options already set with the same value in root tsconfig file that we're going to extend from
+        json.compilerOptions = getNeededCompilerOptionOverrides(
+          tree,
+          { ...json.compilerOptions, ...compilerOptions },
+          // must have been created by now
+          getRootTsConfigFileName(tree)!
+        );
 
         return json;
       }
     );
-  }
-
-  // If we are using the new TS solution
-  // We need to update the workspace file (package.json or pnpm-workspaces.yaml) to include the new project
-  if (options.isUsingTsSolutionConfig) {
-    addProjectToTsSolutionWorkspace(tree, options.projectRoot);
   }
 
   sortPackageJsonFields(tree, options.projectRoot);
@@ -352,8 +371,24 @@ async function configureProject(
       delete projectConfiguration.tags;
     }
 
+    // We want a minimal setup, so unless targets and tags are set, just skip the `nx` property in `package.json`.
+    if (options.isUsingTsSolutionConfig) {
+      delete projectConfiguration.projectType;
+      // SWC executor has logic around sourceRoot and `--strip-leading-paths`. If it is not set then dist will contain the `src` folder rather than being flat.
+      // TODO(leo): Look at how we can remove the dependency on sourceRoot for SWC.
+      if (options.bundler !== 'swc') {
+        delete projectConfiguration.sourceRoot;
+      }
+    }
+
     // empty targets are cleaned up automatically by `updateProjectConfiguration`
-    updateProjectConfiguration(tree, options.name, projectConfiguration);
+    updateProjectConfiguration(
+      tree,
+      options.isUsingTsSolutionConfig
+        ? options.importPath ?? options.name
+        : options.name,
+      projectConfiguration
+    );
   } else if (options.config === 'workspace' || options.config === 'project') {
     addProjectConfiguration(tree, options.name, projectConfiguration);
   } else {
@@ -458,25 +493,25 @@ export async function addLint(
           ruleSeverity = value;
           ruleOptions = {};
         }
-        if (options.bundler === 'vite' || options.unitTestRunner === 'vitest') {
-          ruleOptions.ignoredFiles ??= [];
-          ruleOptions.ignoredFiles.push(
-            '{projectRoot}/vite.config.{js,ts,mjs,mts}'
-          );
-          o.rules['@nx/dependency-checks'] = [ruleSeverity, ruleOptions];
+        const ignoredFiles = new Set(ruleOptions.ignoredFiles ?? []);
+        if (options.bundler === 'vite') {
+          ignoredFiles.add('{projectRoot}/vite.config.{js,ts,mjs,mts}');
         } else if (options.bundler === 'rollup') {
-          ruleOptions.ignoredFiles ??= [];
-          ruleOptions.ignoredFiles.push(
+          ignoredFiles.add(
             '{projectRoot}/rollup.config.{js,ts,mjs,mts,cjs,cts}'
           );
-          o.rules['@nx/dependency-checks'] = [ruleSeverity, ruleOptions];
         } else if (options.bundler === 'esbuild') {
-          ruleOptions.ignoredFiles ??= [];
-          ruleOptions.ignoredFiles.push(
-            '{projectRoot}/esbuild.config.{js,ts,mjs,mts}'
-          );
+          ignoredFiles.add('{projectRoot}/esbuild.config.{js,ts,mjs,mts}');
+        }
+        if (options.unitTestRunner === 'vitest') {
+          ignoredFiles.add('{projectRoot}/vite.config.{js,ts,mjs,mts}');
+        }
+
+        if (ignoredFiles.size) {
+          ruleOptions.ignoredFiles = Array.from(ignoredFiles);
           o.rules['@nx/dependency-checks'] = [ruleSeverity, ruleOptions];
         }
+
         return o;
       }
     );
@@ -613,9 +648,10 @@ function createFiles(tree: Tree, options: NormalizedLibraryGeneratorOptions) {
         ...determineEntryFields(options),
       };
 
-      if (options.bundler === 'none') {
-        updatedPackageJson.type = 'module';
-      } else if (options.bundler !== 'vite' && options.bundler !== 'rollup') {
+      if (
+        options.isUsingTsSolutionConfig &&
+        !['none', 'rollup', 'vite'].includes(options.bundler)
+      ) {
         return getUpdatedPackageJsonContent(updatedPackageJson, {
           main: join(options.projectRoot, 'src/index.ts'),
           outputPath: joinPathFragments(options.projectRoot, 'dist'),
@@ -645,20 +681,19 @@ function createFiles(tree: Tree, options: NormalizedLibraryGeneratorOptions) {
       packageJson.files = ['dist', '!**/*.tsbuildinfo'];
     }
 
-    if (options.isUsingTsSolutionConfig) {
-      if (options.bundler === 'none') {
-        packageJson.type = 'module';
-      } else if (options.bundler !== 'vite' && options.bundler !== 'rollup') {
-        packageJson = getUpdatedPackageJsonContent(packageJson, {
-          main: join(options.projectRoot, 'src/index.ts'),
-          outputPath: joinPathFragments(options.projectRoot, 'dist'),
-          projectRoot: options.projectRoot,
-          rootDir: join(options.projectRoot, 'src'),
-          generateExportsField: true,
-          packageJsonPath,
-          format: ['esm'],
-        });
-      }
+    if (
+      options.isUsingTsSolutionConfig &&
+      !['none', 'rollup', 'vite'].includes(options.bundler)
+    ) {
+      packageJson = getUpdatedPackageJsonContent(packageJson, {
+        main: join(options.projectRoot, 'src/index.ts'),
+        outputPath: joinPathFragments(options.projectRoot, 'dist'),
+        projectRoot: options.projectRoot,
+        rootDir: join(options.projectRoot, 'src'),
+        generateExportsField: true,
+        packageJsonPath,
+        format: ['esm'],
+      });
     }
 
     writeJson<PackageJson>(tree, packageJsonPath, packageJson);
@@ -672,6 +707,13 @@ function createFiles(tree: Tree, options: NormalizedLibraryGeneratorOptions) {
       };
       return json;
     });
+  } else if (
+    !options.isUsingTsSolutionConfig &&
+    options.useProjectJson &&
+    (!options.bundler || options.bundler === 'none') &&
+    !(options.projectRoot === '.')
+  ) {
+    tree.delete(packageJsonPath);
   }
 
   if (options.minimal && !(options.projectRoot === '.')) {
@@ -690,14 +732,13 @@ async function addJest(
     setupFile: 'none',
     supportTsx: false,
     skipSerializers: true,
-    testEnvironment: options.testEnvironment,
+    testEnvironment: options.testEnvironment ?? 'node',
     skipFormat: true,
-    compiler:
-      options.bundler === 'swc' || options.bundler === 'tsc'
-        ? options.bundler
-        : options.bundler === 'rollup'
-        ? 'swc'
-        : undefined,
+    compiler: options.shouldUseSwcJest
+      ? 'swc'
+      : options.bundler === 'tsc'
+      ? 'tsc'
+      : undefined,
     runtimeTsconfigFileName: 'tsconfig.lib.json',
   });
 }
@@ -866,16 +907,24 @@ async function normalizeOptions(
   // We default to generate a project.json file if the new setup is not being used
   options.useProjectJson ??= !isUsingTsSolutionConfig;
 
+  const shouldUseSwcJest =
+    options.bundler === 'swc' ||
+    options.bundler === 'rollup' ||
+    isUsingTsSolutionConfig;
+
   return {
     ...options,
     fileName,
-    name: projectName,
+    name: isUsingTsSolutionConfig
+      ? getImportPath(tree, projectName)
+      : projectName,
     projectNames,
     projectRoot,
     parsedTags,
     importPath,
     hasPlugin,
     isUsingTsSolutionConfig,
+    shouldUseSwcJest,
   };
 }
 
@@ -968,34 +1017,8 @@ function createProjectTsConfigs(
 ) {
   const rootOffset = offsetFromRoot(options.projectRoot);
 
-  let compilerOptionOverrides: Record<keyof CompilerOptions, any> = {
-    module: options.isUsingTsSolutionConfig
-      ? options.bundler === 'rollup'
-        ? 'esnext'
-        : 'nodenext'
-      : 'commonjs',
-    ...(options.isUsingTsSolutionConfig
-      ? options.bundler === 'rollup'
-        ? { moduleResolution: 'bundler' }
-        : { moduleResolution: 'nodenext' }
-      : {}),
-    ...(options.js ? { allowJs: true } : {}),
-    ...(options.strict
-      ? {
-          forceConsistentCasingInFileNames: true,
-          strict: true,
-          importHelpers: true,
-          noImplicitOverride: true,
-          noImplicitReturns: true,
-          noFallthroughCasesInSwitch: true,
-          ...(!options.isUsingTsSolutionConfig
-            ? { noPropertyAccessFromIndexSignature: true }
-            : {}),
-        }
-      : {}),
-  };
-
-  if (!options.rootProject || options.isUsingTsSolutionConfig) {
+  let compilerOptionOverrides = getCompilerOptions(options);
+  if (options.isUsingTsSolutionConfig) {
     // filter out options already set with the same value in root tsconfig file that we're going to extend from
     compilerOptionOverrides = getNeededCompilerOptionOverrides(
       tree,
@@ -1026,6 +1049,7 @@ function createProjectTsConfigs(
         options.bundler === 'tsc'
           ? 'dist'
           : `out-tsc/${options.projectRoot.split('/').pop()}`,
+      emitDeclarationOnly: options.bundler === 'tsc' ? false : true,
     }
   );
 
@@ -1091,6 +1115,38 @@ function createProjectTsConfigs(
     joinPathFragments(options.projectRoot, 'tsconfig.json'),
     tsconfig
   );
+}
+
+function getCompilerOptions(
+  options: NormalizedLibraryGeneratorOptions
+): Record<keyof CompilerOptions, any> {
+  return {
+    module: options.isUsingTsSolutionConfig
+      ? options.bundler === 'rollup'
+        ? 'esnext'
+        : 'nodenext'
+      : 'commonjs',
+    ...(options.isUsingTsSolutionConfig
+      ? {
+          moduleResolution:
+            options.bundler === 'rollup' ? 'bundler' : 'nodenext',
+        }
+      : {}),
+    ...(options.js ? { allowJs: true } : {}),
+    ...(options.strict
+      ? {
+          forceConsistentCasingInFileNames: true,
+          strict: true,
+          importHelpers: true,
+          noImplicitOverride: true,
+          noImplicitReturns: true,
+          noFallthroughCasesInSwitch: true,
+          ...(!options.isUsingTsSolutionConfig
+            ? { noPropertyAccessFromIndexSignature: true }
+            : {}),
+        }
+      : {}),
+  };
 }
 
 function determineDependencies(
@@ -1175,6 +1231,7 @@ function determineEntryFields(
     case 'none': {
       if (options.isUsingTsSolutionConfig) {
         return {
+          type: 'module',
           main: options.js ? './src/index.js' : './src/index.ts',
           types: options.js ? './src/index.js' : './src/index.ts',
           exports: {

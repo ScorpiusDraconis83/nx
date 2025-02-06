@@ -47,10 +47,18 @@ export async function applicationGeneratorInternal(
       skipFormat: true,
       addTsPlugin: _options.useTsSolution,
       formatter: _options.formatter,
+      platform: 'web',
     })
   );
 
   const options = await normalizeOptions(tree, _options);
+
+  // If we are using the new TS solution
+  // We need to update the workspace file (package.json or pnpm-workspaces.yaml) to include the new project
+  if (options.isUsingTsSolutionConfig) {
+    addProjectToTsSolutionWorkspace(tree, options.appProjectRoot);
+  }
+
   const nxJson = readNxJson(tree);
 
   options.addPlugin ??=
@@ -59,15 +67,14 @@ export async function applicationGeneratorInternal(
 
   if (options.isUsingTsSolutionConfig) {
     writeJson(tree, joinPathFragments(options.appProjectRoot, 'package.json'), {
-      name: getImportPath(tree, options.name),
+      name: options.projectName,
       version: '0.0.1',
       private: true,
-      nx: {
-        name: options.name,
-        projectType: 'application',
-        sourceRoot: `${options.appProjectRoot}/src`,
-        tags: options.parsedTags?.length ? options.parsedTags : undefined,
-      },
+      nx: options.parsedTags?.length
+        ? {
+            tags: options.parsedTags,
+          }
+        : undefined,
     });
   } else {
     addProjectConfiguration(tree, options.projectName, {
@@ -107,6 +114,7 @@ export async function applicationGeneratorInternal(
         setParserOptionsProject: options.setParserOptionsProject,
         rootProject: options.rootProject,
         addPlugin: options.addPlugin,
+        projectName: options.projectName,
       },
       'app'
     )
@@ -143,12 +151,6 @@ export async function applicationGeneratorInternal(
         ? ['eslint.config.js', 'eslint.config.cjs', 'eslint.config.mjs']
         : undefined
     );
-  }
-
-  // If we are using the new TS solution
-  // We need to update the workspace file (package.json or pnpm-workspaces.yaml) to include the new project
-  if (options.isUsingTsSolutionConfig) {
-    addProjectToTsSolutionWorkspace(tree, options.appProjectRoot);
   }
 
   sortPackageJsonFields(tree, options.appProjectRoot);

@@ -221,6 +221,8 @@ describe('TargetProjectLocator', () => {
               js: {
                 packageName: '@proj/child-pm-workspaces',
                 packageExports: undefined,
+                isInPackageManagerWorkspaces: true,
+                packageMain: 'index.ts',
               },
             },
           },
@@ -1014,31 +1016,27 @@ describe('TargetProjectLocator', () => {
 
   describe('findDependencyInWorkspaceProjects', () => {
     it.each`
-      pkgName        | project   | exports                                                      | dependency
-      ${'@org/pkg1'} | ${'pkg1'} | ${undefined}                                                 | ${'@org/pkg1'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${undefined}                                                 | ${'@org/pkg1/subpath'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${'dist/index.js'}                                           | ${'@org/pkg1'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{}}                                                        | ${'@org/pkg1'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{}}                                                        | ${'@org/pkg1/subpath'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{ '.': 'dist/index.js' }}                                  | ${'@org/pkg1'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{ '.': 'dist/index.js' }}                                  | ${'@org/pkg1/subpath'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{ './subpath': './dist/subpath.js' }}                      | ${'@org/pkg1'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{ './subpath': './dist/subpath.js' }}                      | ${'@org/pkg1/subpath'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{ import: './dist/index.js', default: './dist/index.js' }} | ${'@org/pkg1'}
-      ${'@org/pkg1'} | ${'pkg1'} | ${{ import: './dist/index.js', default: './dist/index.js' }} | ${'@org/pkg1/subpath'}
+      exports
+      ${undefined}
+      ${'dist/index.js'}
+      ${{}}
+      ${{ '.': 'dist/index.js' }}
+      ${{ './subpath': './dist/subpath.js' }}
+      ${{ import: './dist/index.js', default: './dist/index.js' }}
     `(
-      'should find "$dependency" as "$project" when exports="$exports"',
-      ({ pkgName, project, exports, dependency }) => {
+      'should find "@org/pkg1" package as "pkg1" project when exports="$exports"',
+      ({ exports }) => {
         let projects: Record<string, ProjectGraphProjectNode> = {
-          [project]: {
-            name: project,
+          pkg1: {
+            name: 'pkg1',
             type: 'lib' as const,
             data: {
-              root: project,
+              root: 'pkg1',
               metadata: {
                 js: {
-                  packageName: pkgName,
+                  packageName: '@org/pkg1',
                   packageExports: exports,
+                  isInPackageManagerWorkspaces: true,
                 },
               },
             },
@@ -1051,9 +1049,158 @@ describe('TargetProjectLocator', () => {
           new Map()
         );
         const result =
-          targetProjectLocator.findDependencyInWorkspaceProjects(dependency);
+          targetProjectLocator.findDependencyInWorkspaceProjects('@org/pkg1');
 
-        expect(result).toEqual(project);
+        expect(result).toEqual('pkg1');
+      }
+    );
+
+    it('should not match "@org/pkg2" when there is no workspace project with that package name', () => {
+      let projects: Record<string, ProjectGraphProjectNode> = {
+        pkg1: {
+          name: 'pkg1',
+          type: 'lib' as const,
+          data: {
+            root: 'pkg1',
+            metadata: {
+              js: {
+                packageName: '@org/pkg1',
+                isInPackageManagerWorkspaces: true,
+              },
+            },
+          },
+        },
+      };
+
+      const targetProjectLocator = new TargetProjectLocator(
+        projects,
+        {},
+        new Map()
+      );
+      const result =
+        targetProjectLocator.findDependencyInWorkspaceProjects('@org/pkg2');
+
+      expect(result).toBeFalsy();
+    });
+  });
+
+  describe('findImportInWorkspaceProjects', () => {
+    it.each`
+      exports                                                      | importPath
+      ${'dist/index.js'}                                           | ${'@org/pkg1'}
+      ${{ '.': 'dist/index.js' }}                                  | ${'@org/pkg1'}
+      ${{ './subpath': './dist/subpath.js' }}                      | ${'@org/pkg1/subpath'}
+      ${{ './*': './dist/*.js' }}                                  | ${'@org/pkg1/subpath'}
+      ${{ import: './dist/index.js', default: './dist/index.js' }} | ${'@org/pkg1'}
+    `(
+      'should find "$importPath" as "pkg1" project when exports="$exports"',
+      ({ exports, importPath }) => {
+        let projects: Record<string, ProjectGraphProjectNode> = {
+          pkg1: {
+            name: 'pkg1',
+            type: 'lib' as const,
+            data: {
+              root: 'pkg1',
+              metadata: {
+                js: {
+                  packageName: '@org/pkg1',
+                  packageExports: exports,
+                  isInPackageManagerWorkspaces: true,
+                },
+              },
+            },
+          },
+        };
+
+        const targetProjectLocator = new TargetProjectLocator(
+          projects,
+          {},
+          new Map()
+        );
+        const result =
+          targetProjectLocator.findImportInWorkspaceProjects(importPath);
+
+        expect(result).toEqual('pkg1');
+      }
+    );
+
+    it.each`
+      exports                                                      | importPath
+      ${'dist/index.js'}                                           | ${'@org/pkg1'}
+      ${{ '.': 'dist/index.js' }}                                  | ${'@org/pkg1'}
+      ${{ './subpath': './dist/subpath.js' }}                      | ${'@org/pkg1/subpath'}
+      ${{ './*': './dist/*.js' }}                                  | ${'@org/pkg1/subpath'}
+      ${{ import: './dist/index.js', default: './dist/index.js' }} | ${'@org/pkg1'}
+    `(
+      'should not find "$importPath" as "pkg1" project when exports="$exports" and isInPackageManagerWorkspaces is false',
+      ({ exports, importPath }) => {
+        let projects: Record<string, ProjectGraphProjectNode> = {
+          pkg1: {
+            name: 'pkg1',
+            type: 'lib' as const,
+            data: {
+              root: 'pkg1',
+              metadata: {
+                js: {
+                  packageName: '@org/pkg1',
+                  packageExports: exports,
+                  isInPackageManagerWorkspaces: false,
+                },
+              },
+            },
+          },
+        };
+
+        const targetProjectLocator = new TargetProjectLocator(
+          projects,
+          {},
+          new Map()
+        );
+        const result =
+          targetProjectLocator.findImportInWorkspaceProjects(importPath);
+
+        expect(result).toBeFalsy();
+      }
+    );
+
+    it.each`
+      exports                                                      | importPath
+      ${undefined}                                                 | ${'@org/pkg1'}
+      ${{}}                                                        | ${'@org/pkg1'}
+      ${{ '.': 'dist/index.js' }}                                  | ${'@org/pkg1/subpath'}
+      ${{ './subpath': './dist/subpath.js' }}                      | ${'@org/pkg1/subpath/extra-path'}
+      ${{ './*': './dist/*.js' }}                                  | ${'@org/pkg1/subpath/extra-path'}
+      ${{ './feature': null }}                                     | ${'@org/pkg1/feature'}
+      ${{ import: './dist/index.js', default: './dist/index.js' }} | ${'@org/pkg1/subpath'}
+    `(
+      'should not match "$importPath" when exports="$exports"',
+      ({ exports, importPath }) => {
+        let projects: Record<string, ProjectGraphProjectNode> = {
+          pkg1: {
+            name: 'pkg1',
+            type: 'lib' as const,
+            data: {
+              root: 'pkg1',
+              metadata: {
+                js: {
+                  packageName: '@org/pkg1',
+                  packageExports: exports,
+                  isInPackageManagerWorkspaces: true,
+                },
+              },
+            },
+          },
+        };
+
+        const targetProjectLocator = new TargetProjectLocator(
+          projects,
+          {},
+          new Map()
+        );
+        const result =
+          targetProjectLocator.findImportInWorkspaceProjects(importPath);
+
+        expect(result).toBeFalsy();
       }
     );
   });
